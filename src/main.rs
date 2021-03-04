@@ -25,7 +25,7 @@ async fn main() {
     let log = warp::log("img");
 
     // GET /chat -> messages stream
-    let hello = warp::path!("img" / u32)
+    let hello = warp::path!(u32)
         .and(imgs)
         .and_then(|img_id, imgs: ImgCache| async move {
             if let Ok(img) = proxy_img(img_id, imgs).await {
@@ -40,7 +40,7 @@ async fn main() {
         .with(cors.clone())
         .with(log);
 
-    warp::serve(hello).run(([0, 0, 0, 0], 3032)).await;
+    warp::serve(hello).run(([127, 0, 0, 1], 3032)).await;
 }
 
 async fn proxy_img(img_id: u32, imgs: ImgCache) -> Result<Vec<u8>, io::Error> {
