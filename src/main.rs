@@ -40,13 +40,13 @@ async fn main() {
         .with(cors.clone())
         .with(log);
 
-    warp::serve(hello).run(([127, 0, 0, 1], 3032)).await;
+    warp::serve(hello).run(([0, 0, 0, 0], 3032)).await;
 }
 
 async fn proxy_img(img_id: u32, imgs: ImgCache) -> Result<Vec<u8>, io::Error> {
     let img = imgs.lock().unwrap().get(&img_id).map(|img| img.clone());
     if let Some(img) = img {
-        println!("Retreiving from cache #{}", img_id);
+        println!("Retrieving from cache #{}", img_id);
         Ok(img.clone())
     } else {
         let url = format!("https://wayback.berryclub.io/img/{}", img_id);
