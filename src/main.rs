@@ -3,6 +3,7 @@ use log::{info, warn};
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::env;
+
 use std::sync::{Arc, Mutex};
 use warp::http::Response;
 use warp::path::Tail;
@@ -60,16 +61,29 @@ async fn main() {
 
     let proxy = warp::path!(String / ..)
         .and(warp::path::tail())
+        .and(
+            warp::filters::query::raw()
+                .map(|q| Some(q))
+                .or(warp::any().map(|| None))
+                .unify(),
+        )
         .and(imgs)
-        .and_then(|img_type, img_path: Tail, imgs: ImgCache| async move {
-            match proxy_img(img_type, img_path.as_str().to_string(), imgs).await {
-                Ok(Image { content_type, body }) => Ok(Response::builder()
-                    .header("content-type", content_type)
-                    .header("Cache-Control", "public,max-age=2592000")
-                    .body(body)),
-                Err(_e) => Err(warp::reject::reject()),
-            }
-        })
+        .and_then(
+            |img_type, img_path: Tail, query: Option<String>, imgs: ImgCache| async move {
+                let url = if let Some(query) = query {
+                    format!("{}?{}", img_path.as_str(), query)
+                } else {
+                    img_path.as_str().to_string()
+                };
+                match proxy_img(img_type, url, imgs).await {
+                    Ok(Image { content_type, body }) => Ok(Response::builder()
+                        .header("content-type", content_type)
+                        .header("Cache-Control", "public,max-age=2592000")
+                        .body(body)),
+                    Err(_e) => Err(warp::reject::reject()),
+                }
+            },
+        )
         .with(cors.clone())
         .with(log);
 
@@ -80,16 +94,12 @@ async fn main() {
     warp::serve(proxy).run(([127, 0, 0, 1], port)).await;
 }
 
-async fn proxy_img(
-    img_type: String,
-    img_path: String,
-    imgs: ImgCache,
-) -> Result<Image, FetchError> {
+async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Image, FetchError> {
     let img_type = match img_type.as_str() {
         "thumbnail" => ImgType::Thumbnail,
         _ => return Err(FetchError::InvalidRescaleType),
     };
-    let pair = (img_type, img_path);
+    let pair = (img_type, url);
     let img = imgs.lock().unwrap().get(&pair).cloned();
     let mut attempts = if let Some(img) = img {
         info!(target: "cache", "Retrieving from cache {:?} {}", pair.0, pair.1);
