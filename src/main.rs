@@ -10,7 +10,7 @@ use warp::Filter;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum ImgType {
-    Square96,
+    Thumbnail,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ async fn main() {
     let imgs = warp::any().map(move || imgs.clone());
 
     let cors = warp::cors().allow_any_origin();
-    let log = warp::log("imgs");
+    let log = warp::log("warp");
 
     let proxy = warp::path!(String / ..)
         .and(warp::path::tail())
@@ -73,7 +73,11 @@ async fn main() {
         .with(cors.clone())
         .with(log);
 
-    warp::serve(proxy).run(([127, 0, 0, 1], 3034)).await;
+    let port: u16 = env::var_os("PORT")
+        .map(|port| port.to_str().unwrap().parse().unwrap())
+        .unwrap_or(3030);
+
+    warp::serve(proxy).run(([127, 0, 0, 1], port)).await;
 }
 
 async fn proxy_img(
@@ -82,7 +86,7 @@ async fn proxy_img(
     imgs: ImgCache,
 ) -> Result<Image, FetchError> {
     let img_type = match img_type.as_str() {
-        "96" => ImgType::Square96,
+        "thumbnail" => ImgType::Thumbnail,
         _ => return Err(FetchError::InvalidRescaleType),
     };
     let pair = (img_type, img_path);
