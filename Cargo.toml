@@ -1,6 +1,6 @@
 [package]
 name = "img-proxy"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Evgeny Kuzyakov <ek@nearprotocol.com>"]
 edition = "2018"
 
@@ -10,4 +10,6 @@ edition = "2018"
 tokio = { version = "1", features = ["full"] }
 warp = "0.3"
 reqwest = "0.11.1"
-pretty_env_logger = "0.4"
+env_logger = "0.9"
+chrono = "0.4"
+log = "0.4"
