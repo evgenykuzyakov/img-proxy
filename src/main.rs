@@ -1,20 +1,24 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use log::{info, warn};
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::env;
+use std::fs::File;
+use std::io::{Read, Write};
 
 use std::sync::{Arc, Mutex};
 use warp::http::Response;
 use warp::path::Tail;
 use warp::Filter;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-enum ImgType {
+use borsh::{BorshDeserialize, BorshSerialize};
+
+#[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
+pub enum ImgType {
     Thumbnail,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct Image {
     content_type: String,
     body: Vec<u8>,
@@ -41,7 +45,21 @@ pub enum CachedImage {
     },
 }
 
-type ImgCache = Arc<Mutex<HashMap<(ImgType, String), CachedImage>>>;
+
+type ImgPair = (ImgType, String);
+type ImgCache = Arc<Mutex<HashMap<ImgPair, CachedImage>>>;
+
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+pub struct SavedImage {
+    pub pair: ImgPair,
+    pub image: Image,
+    pub time_nanos: i64,
+}
+
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(data).into()
+}
 
 #[tokio::main]
 async fn main() {
@@ -118,6 +136,11 @@ async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Imag
             CachedImage::Success { image, .. } => return Ok(image),
         }
     } else {
+        // TODO: read from disk
+        if let Some(saved_image) = read_from_disk(&pair) {
+            info!(target: "cache", "Retrieving from disk {:?} {}", pair.0, pair.1);
+            return Ok(cache_and_return(imgs, saved_image));
+        }
         vec![]
     };
     let url = format!(
@@ -129,14 +152,8 @@ async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Imag
     info!(target: "cache", "Caching {:?} {}", pair.0, pair.1);
     match res {
         Ok(image) => {
-            imgs.lock().unwrap().insert(
-                pair,
-                CachedImage::Success {
-                    image: image.clone(),
-                    time: Utc::now(),
-                },
-            );
-            Ok(image)
+            let saved_image = write_to_disk(pair, image).expect("Failed to save to disk");
+            Ok(cache_and_return(imgs, saved_image))
         }
         Err(err) => {
             attempts.push(Utc::now());
@@ -150,6 +167,19 @@ async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Imag
             Err(err)
         }
     }
+}
+
+fn cache_and_return(imgs: ImgCache, saved_image: SavedImage) -> Image {
+    let naive = NaiveDateTime::from_timestamp(saved_image.time_nanos / 1_000_000_000, (saved_image.time_nanos % 1_000_000_000) as u32);
+    let time = DateTime::from_utc(naive, Utc);
+    imgs.lock().unwrap().insert(
+        saved_image.pair,
+        CachedImage::Success {
+            image: saved_image.image.clone(),
+            time,
+        },
+    );
+    saved_image.image
 }
 
 async fn fetch_img(url: String) -> Result<Image, FetchError> {
@@ -176,4 +206,40 @@ async fn fetch_img(url: String) -> Result<Image, FetchError> {
         content_type,
         body: body.to_vec(),
     })
+}
+
+fn read_from_disk(pair: &ImgPair) -> Option<SavedImage> {
+    let (_dir, path) = pair_to_path(&pair);
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(_e) => return None,
+    };
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_ok() {
+        SavedImage::try_from_slice(&buf).ok()
+    } else {
+        None
+    }
+}
+
+fn pair_to_path(pair: &ImgPair) -> (String, String) {
+    let filename = hex::encode(sha256(pair.1.as_bytes()));
+    let (dir1, filename) = filename.split_at(3);
+    let (dir2, filename) = filename.split_at(3);
+    let dir = format!("cache/{:?}/{}/{}", pair.0, dir1, dir2);
+    let path = format!("{}/{}", dir, filename);
+    (dir, path)
+}
+
+fn write_to_disk(pair: ImgPair, image: Image) -> Result<SavedImage, std::io::Error> {
+    let (dir, path) = pair_to_path(&pair);
+    std::fs::create_dir_all(dir)?;
+    let mut file = File::create(path).unwrap();
+    let saved_image = SavedImage{
+        image,
+        pair,
+        time_nanos: Utc::now().timestamp_nanos(),
+    };
+    file.write_all(&saved_image.try_to_vec().unwrap())?;
+    Ok(saved_image)
 }
