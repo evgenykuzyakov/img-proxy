@@ -12,6 +12,7 @@ use warp::path::Tail;
 use warp::Filter;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use reqwest::header::REFERER;
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum ImgType {
@@ -184,7 +185,8 @@ fn cache_and_return(imgs: ImgCache, saved_image: SavedImage) -> Image {
 
 async fn fetch_img(url: String) -> Result<Image, FetchError> {
     info!(target: "fetch", "Fetching {}", url);
-    let response = reqwest::get(&url)
+    let client = reqwest::Client::new();
+    let response = client.get(&url).header(REFERER, env::var_os("REFERER").unwrap().to_str().unwrap()).send()
         .await
         .map_err(|_e| FetchError::RequestFailed)?;
     if !response.status().is_success() {
