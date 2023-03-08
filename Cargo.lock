@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "img-proxy"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "borsh",
  "chrono",

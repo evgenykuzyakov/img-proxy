@@ -17,6 +17,7 @@ use reqwest::header::REFERER;
 #[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum ImgType {
     Thumbnail,
+    Large,
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -64,8 +65,8 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 #[tokio::main]
 async fn main() {
-    if env::var_os("IMAGE_RESCALE_URL").is_none() {
-        panic!("Env IMAGE_RESCALE_URL is required");
+    if env::var_os("IMAGE_RESCALE_URL_Thumbnail").is_none() || env::var_os("IMAGE_RESCALE_URL_Large").is_none() {
+        panic!("Env IMAGE_RESCALE_URL_Thumbnail and IMAGE_RESCALE_URL_Large are required");
     }
     env_logger::init();
 
@@ -116,6 +117,7 @@ async fn main() {
 async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Image, FetchError> {
     let img_type = match img_type.as_str() {
         "thumbnail" => ImgType::Thumbnail,
+        "large" => ImgType::Large,
         _ => return Err(FetchError::InvalidRescaleType),
     };
     let pair = (img_type, url);
@@ -146,7 +148,7 @@ async fn proxy_img(img_type: String, url: String, imgs: ImgCache) -> Result<Imag
     };
     let url = format!(
         "{}/{}",
-        env::var_os("IMAGE_RESCALE_URL").unwrap().to_str().unwrap(),
+        env::var_os(format!("IMAGE_RESCALE_URL_{:?}", pair.0)).unwrap().to_str().unwrap(),
         pair.1
     );
     let res = fetch_img(url).await;
