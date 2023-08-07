@@ -33,6 +33,7 @@ pub enum FetchError {
     UnsupportedContentType,
     BodyReadFailed,
     TextReadFailed,
+    InvalidDataUrl,
     Status(StatusCode),
 }
 
@@ -157,6 +158,22 @@ async fn proxy_img(
     };
     if is_magic {
         url = resolve_magic_url(url, magic).await?;
+    }
+
+    if url.starts_with("data:") {
+        let mut parts = url[5..].splitn(2, ",");
+        let content_type = parts
+            .next()
+            .ok_or_else(|| FetchError::InvalidDataUrl)?
+            .splitn(2, ";")
+            .next()
+            .ok_or_else(|| FetchError::InvalidDataUrl)?;
+        let body = base64::decode(parts.next().ok_or_else(|| FetchError::InvalidDataUrl)?)
+            .map_err(|_| FetchError::InvalidDataUrl)?;
+        return Ok(Image {
+            content_type: content_type.to_string(),
+            body,
+        });
     }
 
     let pair = (img_type, url);
