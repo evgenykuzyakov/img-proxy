@@ -160,7 +160,7 @@ async fn proxy_img(
         url = resolve_magic_url(url, magic).await?;
     }
 
-    if url.starts_with("data:") {
+    if url.starts_with("data:image/") {
         let mut parts = url[5..].splitn(2, ",");
         let content_type = parts
             .next()
@@ -281,10 +281,11 @@ async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, Fet
 }
 
 fn cache_and_return(imgs: ImgCache, saved_image: SavedImage) -> Image {
-    let naive = NaiveDateTime::from_timestamp(
+    let naive = NaiveDateTime::from_timestamp_opt(
         saved_image.time_nanos / 1_000_000_000,
         (saved_image.time_nanos % 1_000_000_000) as u32,
-    );
+    )
+    .unwrap();
     let time = DateTime::from_utc(naive, Utc);
     imgs.lock().unwrap().insert(
         saved_image.pair,
