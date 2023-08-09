@@ -14,6 +14,8 @@ use warp::Filter;
 use borsh::{BorshDeserialize, BorshSerialize};
 use reqwest::header::REFERER;
 
+const MAGIC_CACHE_DURATION_SECONDS: i64 = 1 * 60 * 60;
+
 #[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum ImgType {
     Thumbnail,
@@ -117,10 +119,18 @@ async fn main() {
                     } else {
                         img_path.as_str().to_string()
                     };
+                    let is_magic = img_type == "magic";
                     match proxy_img(img_type, url, imgs, magic).await {
                         Ok(Image { content_type, body }) => Ok(Response::builder()
                             .header("content-type", content_type)
-                            .header("Cache-Control", "public,max-age=2592000")
+                            .header(
+                                "Cache-Control",
+                                if is_magic {
+                                    format!("public,max-age={MAGIC_CACHE_DURATION_SECONDS}")
+                                } else {
+                                    "public,max-age=2592000".to_string()
+                                },
+                            )
                             .body(body)),
                         Err(_e) => Err(warp::reject::reject()),
                     }
@@ -232,7 +242,7 @@ async fn proxy_img(
 
 async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, FetchError> {
     let magic_url = magic.lock().unwrap().get(&url).cloned();
-    let mut attempts = if let Some(magic_url) = magic_url {
+    let attempts = if let Some(magic_url) = magic_url {
         info!(target: "cache", "Retrieving from magic cache {}", url);
         match magic_url {
             CachedMagicUrl::Failed { err, attempts } => {
@@ -246,12 +256,32 @@ async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, Fet
                 }
                 attempts
             }
-            CachedMagicUrl::Success { url, .. } => return Ok(url),
+            CachedMagicUrl::Success {
+                url: magic_url,
+                time,
+            } => {
+                let now = Utc::now();
+                let duration = now.signed_duration_since(time);
+                if duration > Duration::seconds(MAGIC_CACHE_DURATION_SECONDS) {
+                    tokio::spawn(async move {
+                        let _res = magic_fetch_and_cache(url, magic, vec![]).await;
+                    });
+                }
+                return Ok(magic_url);
+            }
         }
     } else {
         Vec::new()
     };
 
+    magic_fetch_and_cache(url, magic, attempts).await
+}
+
+async fn magic_fetch_and_cache(
+    url: String,
+    magic: MagicCache,
+    mut attempts: Vec<DateTime<Utc>>,
+) -> Result<String, FetchError> {
     let res = fetch_magic_url(url.clone()).await;
     info!(target: "cache", "Caching magic {}", url);
     match res {
