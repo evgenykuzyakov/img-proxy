@@ -15,6 +15,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use reqwest::header::REFERER;
 
 const MAGIC_CACHE_DURATION_SECONDS: i64 = 1 * 60 * 60;
+const MAX_REFRESH_TIMEOUT: u64 = 60 * 60;
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum ImgType {
@@ -195,7 +196,10 @@ async fn proxy_img(
                 let now = Utc::now();
                 let num_attempts = attempts.len() as u32;
                 warn!(target: "cache", "Failed attempts {}", num_attempts);
-                let timeout = Duration::seconds(2u64.pow(num_attempts - 1) as _);
+                let timeout = Duration::seconds(std::cmp::min(
+                    MAX_REFRESH_TIMEOUT,
+                    2u64.pow(num_attempts - 1),
+                ) as _);
                 let duration = now.signed_duration_since(attempts.last().unwrap().clone());
                 if duration < timeout {
                     return Err(err);
@@ -249,7 +253,10 @@ async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, Fet
                 let now = Utc::now();
                 let num_attempts = attempts.len() as u32;
                 warn!(target: "cache", "Failed attempts {}", num_attempts);
-                let timeout = Duration::seconds(2u64.pow(num_attempts - 1) as _);
+                let timeout = Duration::seconds(std::cmp::min(
+                    MAX_REFRESH_TIMEOUT,
+                    2u64.pow(num_attempts - 1),
+                ) as _);
                 let duration = now.signed_duration_since(attempts.last().unwrap().clone());
                 if duration < timeout {
                     return Err(err);
