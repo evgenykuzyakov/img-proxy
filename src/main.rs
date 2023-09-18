@@ -15,7 +15,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use reqwest::header::REFERER;
 
 const MAGIC_CACHE_DURATION_SECONDS: i64 = 1 * 60 * 60;
+const REGULAR_CACHE_DURATION_SECONDS: i64 = 30 * 24 * 60 * 60;
 const MAX_REFRESH_TIMEOUT: u64 = 60 * 60;
+const PURGE_MAGIC_KEYWORD: &str = "purge";
 
 #[derive(Debug, PartialEq, Copy, Clone, Eq, Hash, BorshSerialize, BorshDeserialize)]
 pub enum ImgType {
@@ -29,6 +31,11 @@ pub struct Image {
     body: Vec<u8>,
 }
 
+pub struct ImageWithCacheDuration {
+    pub image: Image,
+    pub cache_duration_seconds: i64,
+}
+
 #[derive(Debug, Clone)]
 pub enum FetchError {
     InvalidRescaleType,
@@ -37,6 +44,7 @@ pub enum FetchError {
     BodyReadFailed,
     TextReadFailed,
     InvalidDataUrl,
+    Purge,
     Status(StatusCode),
 }
 
@@ -60,6 +68,7 @@ pub enum CachedMagicUrl {
     },
     Success {
         url: String,
+        status: u16,
         time: DateTime<Utc>,
     },
 }
@@ -120,20 +129,23 @@ async fn main() {
                     } else {
                         img_path.as_str().to_string()
                     };
-                    let is_magic = img_type == "magic";
                     match proxy_img(img_type, url, imgs, magic).await {
-                        Ok(Image { content_type, body }) => Ok(Response::builder()
+                        Ok(ImageWithCacheDuration {
+                            image: Image { content_type, body },
+                            cache_duration_seconds,
+                        }) => Ok(Response::builder()
                             .header("content-type", content_type)
                             .header(
                                 "Cache-Control",
-                                if is_magic {
-                                    format!("public,max-age={MAGIC_CACHE_DURATION_SECONDS}")
-                                } else {
-                                    "public,max-age=2592000".to_string()
-                                },
+                                format!("public,max-age={cache_duration_seconds}"),
                             )
                             .body(body)),
-                        Err(_e) => Err(warp::reject::reject()),
+                        Err(e) => match e {
+                            FetchError::Purge => Ok(Response::builder()
+                                .header("content-type", "text/plain")
+                                .body("Purged".as_bytes().to_vec())),
+                            _ => Err(warp::reject::reject()),
+                        },
                     }
                 },
             )
@@ -152,7 +164,7 @@ async fn proxy_img(
     mut url: String,
     imgs: ImgCache,
     magic: MagicCache,
-) -> Result<Image, FetchError> {
+) -> Result<ImageWithCacheDuration, FetchError> {
     let is_magic = img_type == "magic";
     if is_magic {
         if let Some((t, u)) = url.clone().split_once("/") {
@@ -162,13 +174,24 @@ async fn proxy_img(
             return Err(FetchError::InvalidRescaleType);
         }
     }
+    if img_type == PURGE_MAGIC_KEYWORD {
+        let _magic_url = magic.lock().unwrap().remove(&url);
+        return Err(FetchError::Purge);
+    }
     let img_type = match img_type.as_str() {
         "thumbnail" => ImgType::Thumbnail,
         "large" => ImgType::Large,
         _ => return Err(FetchError::InvalidRescaleType),
     };
+    let mut cache_duration_seconds = REGULAR_CACHE_DURATION_SECONDS;
     if is_magic {
-        url = resolve_magic_url(url, magic).await?;
+        let (resolved_url, status) = resolve_magic_url(url, magic).await?;
+        cache_duration_seconds = if status.as_u16() == 200 {
+            MAGIC_CACHE_DURATION_SECONDS
+        } else {
+            0
+        };
+        url = resolved_url;
     }
 
     if url.starts_with("data:image/") {
@@ -181,9 +204,12 @@ async fn proxy_img(
             .ok_or_else(|| FetchError::InvalidDataUrl)?;
         let body = base64::decode(parts.next().ok_or_else(|| FetchError::InvalidDataUrl)?)
             .map_err(|_| FetchError::InvalidDataUrl)?;
-        return Ok(Image {
-            content_type: content_type.to_string(),
-            body,
+        return Ok(ImageWithCacheDuration {
+            image: Image {
+                content_type: content_type.to_string(),
+                body,
+            },
+            cache_duration_seconds,
         });
     }
 
@@ -206,12 +232,20 @@ async fn proxy_img(
                 }
                 attempts
             }
-            CachedImage::Success { image, .. } => return Ok(image),
+            CachedImage::Success { image, .. } => {
+                return Ok(ImageWithCacheDuration {
+                    image,
+                    cache_duration_seconds,
+                })
+            }
         }
     } else {
         if let Some(saved_image) = read_from_disk(&pair) {
             info!(target: "cache", "Retrieving from disk {:?} {}", pair.0, pair.1);
-            return Ok(cache_and_return(imgs, saved_image));
+            return Ok(ImageWithCacheDuration {
+                image: cache_and_return(imgs, saved_image),
+                cache_duration_seconds,
+            });
         }
         vec![]
     };
@@ -228,7 +262,10 @@ async fn proxy_img(
     match res {
         Ok(image) => {
             let saved_image = write_to_disk(pair, image).expect("Failed to save to disk");
-            Ok(cache_and_return(imgs, saved_image))
+            Ok(ImageWithCacheDuration {
+                image: cache_and_return(imgs, saved_image),
+                cache_duration_seconds,
+            })
         }
         Err(err) => {
             attempts.push(Utc::now());
@@ -244,7 +281,10 @@ async fn proxy_img(
     }
 }
 
-async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, FetchError> {
+async fn resolve_magic_url(
+    url: String,
+    magic: MagicCache,
+) -> Result<(String, StatusCode), FetchError> {
     let magic_url = magic.lock().unwrap().get(&url).cloned();
     let attempts = if let Some(magic_url) = magic_url {
         info!(target: "cache", "Retrieving from magic cache {}", url);
@@ -265,6 +305,7 @@ async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, Fet
             }
             CachedMagicUrl::Success {
                 url: magic_url,
+                status,
                 time,
             } => {
                 let now = Utc::now();
@@ -274,7 +315,7 @@ async fn resolve_magic_url(url: String, magic: MagicCache) -> Result<String, Fet
                         let _res = magic_fetch_and_cache(url, magic, vec![]).await;
                     });
                 }
-                return Ok(magic_url);
+                return Ok((magic_url, StatusCode::from_u16(status).unwrap()));
             }
         }
     } else {
@@ -288,20 +329,21 @@ async fn magic_fetch_and_cache(
     url: String,
     magic: MagicCache,
     mut attempts: Vec<DateTime<Utc>>,
-) -> Result<String, FetchError> {
+) -> Result<(String, StatusCode), FetchError> {
     let res = fetch_magic_url(url.clone()).await;
     info!(target: "cache", "Caching magic {}", url);
     match res {
-        Ok(magic_url) => {
+        Ok((magic_url, status)) => {
             let time = Utc::now();
             magic.lock().unwrap().insert(
                 url,
                 CachedMagicUrl::Success {
                     url: magic_url.clone(),
+                    status: status.as_u16(),
                     time,
                 },
             );
-            Ok(magic_url)
+            Ok((magic_url, status))
         }
         Err(err) => {
             attempts.push(Utc::now());
@@ -364,7 +406,7 @@ async fn fetch_img(url: String) -> Result<Image, FetchError> {
     })
 }
 
-async fn fetch_magic_url(url: String) -> Result<String, FetchError> {
+async fn fetch_magic_url(url: String) -> Result<(String, StatusCode), FetchError> {
     info!(target: "fetch", "Fetching magic url {}", url);
     let client = reqwest::Client::new();
     let response = client
@@ -373,6 +415,7 @@ async fn fetch_magic_url(url: String) -> Result<String, FetchError> {
         .send()
         .await
         .map_err(|_e| FetchError::RequestFailed)?;
+    let status = response.status();
     if !response.status().is_success() {
         return Err(FetchError::Status(response.status()));
     }
@@ -390,7 +433,7 @@ async fn fetch_magic_url(url: String) -> Result<String, FetchError> {
         .text()
         .await
         .map_err(|_e| FetchError::TextReadFailed)?;
-    Ok(text)
+    Ok((text, status))
 }
 
 fn read_from_disk(pair: &ImgPair) -> Option<SavedImage> {
